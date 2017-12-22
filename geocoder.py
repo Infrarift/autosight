@@ -3,31 +3,41 @@ import requests
 import urllib
 import os
 
-GOOGLE_MAPS_API_URL = 'https://maps.googleapis.com/maps/api/geocode/json'
 
-myloc = "./"  # replace with your own location
-key = "&key=" + "AIzaSyAHMNFs_tJcjtCmP5QrW_giQUnZygUh7rA"
+class StreetViewLoader:
+    def __init__(self, save_path="./crawl", api_key=""):
+        self.google_street_view_url = "https://maps.googleapis.com/maps/api/streetview"
+        self.save_dir = save_path
+        self.width = 800
+        self.height = 600
+        self.fov = 85
+        self.api_key = api_key
 
-if not os.path.exists("./crawl"):
-    os.mkdir("crawl")
+        self._create_save_dir(self.save_dir)
 
+    def save_street_image(self, location, heading, name):
+        query_url = self._get_query_url(self.google_street_view_url, heading, location, self.api_key)
+        sub_dir = os.path.join(self.save_dir, name)
+        self._create_save_dir(sub_dir)
+        save_path = os.path.join(sub_dir, "{}_{}.jpg".format(location, heading))
+        urllib.urlretrieve(query_url, save_path)
 
-def get_street(add, heading, save_dir):
-    base = "https://maps.googleapis.com/maps/api/streetview?size=600x300&fov=50&heading={}&location=".format(heading)
-    my_url = base + add + key
-    file_name = "./crawl/{}_{}.jpg".format(add, heading)
-    urllib.urlretrieve(my_url, os.path.join(save_dir, file_name))
+    @staticmethod
+    def _create_save_dir(save_path):
+        if not os.path.exists(save_path):
+            os.mkdir(save_path)
 
-
-# Tests = ["211 Royal Street, Yokine, WA 6060",
-#          "151 Hensman Road, WA, 6008"]
-#
-# for i in Tests:
-#     get_street(i, myloc)
-
-
-def lerp(a, b, f):
-    return a + f * (b - a)
+    def _get_query_url(self, api_address, heading, location, key):
+        query_address = "{}?size={}x{}&fov={}&heading={}&location={}&key={}".format(
+            api_address,
+            self.width,
+            self.height,
+            self.fov,
+            heading,
+            location,
+            key
+        )
+        return query_address
 
 
 class GeoLoc:
@@ -39,13 +49,21 @@ class GeoLoc:
 class GeoCoder:
     K_DISTANCE_BLOCK = 0.0015
 
-    def __init__(self):
+    def __init__(self, api_key=""):
         print("Init GeoCoder")
-        self.key = 'AIzaSyAHMNFs_tJcjtCmP5QrW_giQUnZygUh7rA'
+        self.key = api_key
         self.state = "WA, Australia"
+        self.google_geocoder_url = "https://maps.googleapis.com/maps/api/geocode/json"
 
     def process(self, street, start_num, end_num, postcode):
-        address = "{}, {}, {}".format(street, postcode, self.state)
+        address = street
+
+        if postcode is not None:
+            address = "{}, {}".format(address, postcode)
+
+        if self.state is not None:
+            address = "{}, {}".format(address, self.state)
+
         start_address = "{} {}".format(start_num, address)
         end_address = "{} {}".format(end_num, address)
         g1 = self.get_geoloc(start_address)
@@ -59,7 +77,7 @@ class GeoCoder:
         }
 
         # Do the request and get the response data
-        req = requests.get(GOOGLE_MAPS_API_URL, params=params)
+        req = requests.get(self.google_geocoder_url, params=params)
         res = req.json()
 
         # Use the first result
@@ -69,62 +87,82 @@ class GeoCoder:
         geoloc.lat = result['geometry']['location']['lat']
         geoloc.long = result['geometry']['location']['lng']
 
-        print("GEOLOC: {}, {}".format(geoloc.lat, geoloc.long))
         return geoloc
 
     def get_geo_line(self, g1, g2):
         distance = math.sqrt(pow(g1.lat - g2.lat, 2) + pow(g1.long - g2.long, 2))
         divs = math.ceil(distance / GeoCoder.K_DISTANCE_BLOCK)
-        print(divs)
-        print("distance: {}".format(distance))
         split_step = 1 / divs
-        print ("Split Steps: {}".format(split_step))
 
         steps = []
         for i in range(int(divs) + 1):
             steps.append(i * split_step)
 
-        print(steps)
         final_geos = []
         for step in steps:
             g = GeoLoc()
-            g.lat = lerp(g1.lat, g2.lat, step)
-            g.long = lerp(g1.long, g2.long, step)
+            g.lat = self._linear_interpolate(g1.lat, g2.lat, step)
+            g.long = self._linear_interpolate(g1.long, g2.long, step)
             final_geos.append(g)
-            # print("")
-            # print("LAT: {}".format(g.lat))
-            # print("LNG: {}".format(g.long))
 
         return final_geos
 
+    @staticmethod
+    def _linear_interpolate(a, b, f):
+        return a + f * (b - a)
+
+
+class StreetScanner:
+    def __init__(self):
+        API_KEY = "AIzaSyAHMNFs_tJcjtCmP5QrW_giQUnZygUh7rA"
+        self.geocoder = GeoCoder(api_key=API_KEY)
+        self.street_loader = StreetViewLoader(save_path="./crawl", api_key=API_KEY)
+
+    def scan_street(self, street_name, start_address, end_address, postcode=None):
+        g1, g2 = self.geocoder.process(street_name, start_address, end_address, postcode)
+        line = self.geocoder.get_geo_line(g1, g2)
+        angle_rad = math.atan2(g2.long - g1.long, g2.lat - g1.lat)
+        angle_heading = int((angle_rad / (math.pi * 2)) * 360)
+
+        for geoloc in line:
+            location = "{}, {}".format(geoloc.lat, geoloc.long)
+            self.street_loader.save_street_image(location, angle_heading, street_name)
+
+            alt_angle = angle_heading - 180
+            if alt_angle < 0:
+                alt_angle += 360
+
+            self.street_loader.save_street_image(location, alt_angle, street_name)
+
+
+    def scan_region(self, lat, long, range_km, heading_offset):
+        scan_block_size = 0.0015
+        scan_range = range_km * 0.01
+        start_lat = lat - scan_range / 2
+        start_long = long - scan_range / 2
+        scan_steps = int(math.ceil(scan_range / scan_block_size))
+        region_name = "Region {} {}".format(lat, long)
+        print("Region Steps: {}".format(scan_steps))
+        for i in range(scan_steps):
+            scan_lat = start_lat + scan_block_size * i
+            for j in range(scan_steps):
+                scan_long = start_long + scan_block_size * j
+
+                location = "{}, {}".format(scan_lat, scan_long)
+                headings = [0, 90, 180, 270]
+                print(location)
+                for h in headings:
+                    h2 = h + heading_offset
+                    while h2 > 360:
+                        h2 -= 360
+                    self.street_loader.save_street_image(location, h2, region_name)
 
 if __name__ == "__main__":
-    print("Hello World")
-    geocoder = GeoCoder()
-    # geocoder.process("St Georges Terrace", 200, 20, 6000)
+    street_scanner = StreetScanner()
+    # street_scanner.scan_region(-31.950669, 115.824032, 0.5, 0)
+    street_scanner.scan_street("Fitzgerald Street", 20, 200, 6000)
+    street_scanner.scan_street("Rokeby Rd", 30, 400, 6008)
+    street_scanner.scan_street("Hamersley Rd", 20, 250, 6008)
+    street_scanner.scan_street("Adelaide Terrace", 50, 250, 6000)
+    street_scanner.scan_street("Lake Street", 100, 240, 6000)
 
-    # g1 = GeoLoc()
-    # g1.lat = -31.9534685
-    # g1.long = 115.8525777
-    #
-    # g2 = GeoLoc()
-    # g2.lat = -31.9571264
-    # g2.long = 115.8640418
-
-    g1, g2 = geocoder.process("Fitzgerald Street", 2, 170, 6000)
-
-    line = geocoder.get_geo_line(g1, g2)
-    angle_rad = math.atan2(g2.long - g1.long, g2.lat - g1.lat)
-    print("Angle Rad: {}".format(angle_rad))
-    angle_heading = int((angle_rad / (math.pi * 2)) * 360)
-    print("Angle Heading: {}".format(angle_heading))
-
-    for geoloc in line:
-        location = "{}, {}".format(geoloc.lat, geoloc.long)
-        get_street(location, angle_heading, myloc)
-
-        alt_angle = angle_heading - 180
-        if alt_angle < 0:
-            alt_angle += 360
-
-        get_street(location, alt_angle, myloc)
